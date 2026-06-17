@@ -392,17 +392,27 @@ class BilibiliCrawler(AbstractCrawler):
         """
         utils.logger.info("[BilibiliCrawler.get_specified_videos] Parsing video URLs...")
         bvids_list = []
+        aids_list = []
         for video_url in video_url_list:
             try:
                 video_info = parse_video_info_from_url(video_url)
-                bvids_list.append(video_info.video_id)
+                if video_info.video_id.startswith("av"):
+                    aids_list.append(int(video_info.video_id[2:]))
+                else:
+                    bvids_list.append(video_info.video_id)
                 utils.logger.info(f"[BilibiliCrawler.get_specified_videos] Parsed video ID: {video_info.video_id} from {video_url}")
             except ValueError as e:
                 utils.logger.error(f"[BilibiliCrawler.get_specified_videos] Failed to parse video URL: {e}")
                 continue
 
         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
-        task_list = [self.get_video_info_task(aid=0, bvid=video_id, semaphore=semaphore) for video_id in bvids_list]
+        task_list = [
+            self.get_video_info_task(aid=0, bvid=video_id, semaphore=semaphore)
+            for video_id in bvids_list
+        ] + [
+            self.get_video_info_task(aid=aid, bvid="", semaphore=semaphore)
+            for aid in aids_list
+        ]
         video_details = await asyncio.gather(*task_list)
         video_aids_list = []
         for video_detail in video_details:

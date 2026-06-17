@@ -113,7 +113,7 @@ class XhsJsonlStoreImplement(AbstractStore):
         await self.writer.write_to_jsonl(item_type="comments", item=comment_item)
 
     async def store_creator(self, creator_item: Dict):
-        pass
+        await self.writer.write_to_jsonl(item_type="creators", item=creator_item)
 
     def flush(self):
         pass
