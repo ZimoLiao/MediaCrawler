@@ -166,3 +166,51 @@ Get-CimInstance Win32_Process |
   Where-Object { $_.CommandLine -match "mediacrawler_hotboard_relay_8768.py" } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```
+
+## Auto Start On Windows Login
+
+The repository includes a Windows PowerShell autostart script:
+
+```text
+scripts/hotboard_autostart_windows.ps1
+```
+
+It starts the WSL hotboard service on port `8767`, then starts a Windows relay on port `8768` for Tailscale access. The script is idempotent: if the WSL service or relay is already running, it skips starting duplicates.
+
+Install it into the current user's Windows Startup folder:
+
+```powershell
+$script = "$env:LOCALAPPDATA\MediaCrawler\Hotboard\hotboard_autostart_windows.ps1"
+$startup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\MediaCrawlerHotboard.cmd"
+New-Item -ItemType Directory -Force -Path (Split-Path $script) | Out-Null
+Copy-Item "\\wsl.localhost\Ubuntu-24.04\home\lzmo\repos\external\MediaCrawler\scripts\hotboard_autostart_windows.ps1" $script -Force
+$cmd = @(
+  "@echo off",
+  "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`" >> `"$env:LOCALAPPDATA\MediaCrawler\Hotboard\startup.cmd.log`" 2>&1"
+)
+Set-Content -Path $startup -Value $cmd -Encoding ASCII
+```
+
+Run it immediately:
+
+```powershell
+& "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\MediaCrawlerHotboard.cmd"
+```
+
+Check the startup file exists:
+
+```powershell
+Get-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\MediaCrawlerHotboard.cmd"
+```
+
+Autostart logs are written to:
+
+```text
+%LOCALAPPDATA%\MediaCrawler\Hotboard\autostart.log
+```
+
+Remove the login startup item:
+
+```powershell
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\MediaCrawlerHotboard.cmd"
+```
