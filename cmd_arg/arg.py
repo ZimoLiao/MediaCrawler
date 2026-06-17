@@ -332,6 +332,22 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="Proxy Configuration",
             ),
         ] = config.STATIC_PROXY_URL,
+        cdp_host: Annotated[
+            str,
+            typer.Option(
+                "--cdp_host",
+                help="CDP host to connect to, useful for WSL/container port forwarding",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = config.CDP_HOST,
+        cdp_debug_port: Annotated[
+            int,
+            typer.Option(
+                "--cdp_debug_port",
+                help="CDP debug port used to connect to an existing browser",
+                rich_help_panel="Runtime Configuration",
+            ),
+        ] = config.CDP_DEBUG_PORT,
     ) -> SimpleNamespace:
         """MediaCrawler 命令行入口"""
 
@@ -365,6 +381,8 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.IP_PROXY_POOL_COUNT = ip_proxy_pool_count
         config.IP_PROXY_PROVIDER_NAME = ip_proxy_provider_name
         config.STATIC_PROXY_URL = static_proxy_url
+        config.CDP_HOST = cdp_host
+        config.CDP_DEBUG_PORT = cdp_debug_port
 
         # Set platform-specific ID lists for detail/creator mode
         if specified_id_list:
@@ -415,6 +433,8 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             cookies=config.COOKIES,
             specified_id=specified_id,
             creator_id=creator_id,
+            cdp_host=config.CDP_HOST,
+            cdp_debug_port=config.CDP_DEBUG_PORT,
         )
 
     command = typer.main.get_command(app)

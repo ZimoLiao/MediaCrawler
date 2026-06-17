@@ -58,9 +58,71 @@ ENABLE_CDP_MODE = True
 # 连接已有浏览器（默认开启）
 CDP_CONNECT_EXISTING = True
 
+# CDP调试主机（本机默认 localhost；WSL 连接 Windows 浏览器时改为 Windows/宿主机 IP）
+CDP_HOST = "localhost"
+
 # CDP调试端口（与 chrome://inspect 页面显示的端口一致）
 CDP_DEBUG_PORT = 9222
 ```
+
+### WSL 连接 Windows Edge
+
+如果仓库运行在 WSL，而 Edge 运行在 Windows 里，`chrome://inspect/#remote-debugging` 显示的 `127.0.0.1:9222` 是 Windows 自己的回环地址，WSL 不能直接访问。需要先在 Windows 侧把端口转发到 WSL 能访问的地址，再在爬虫命令里指定 `--cdp_host` 和 `--cdp_debug_port`。
+
+1. 在 Edge 地址栏打开 `edge://inspect/#remote-debugging` 或 `chrome://inspect/#remote-debugging`
+2. 勾选 **"Allow remote debugging for this browser instance"**
+3. 在 Windows PowerShell 里启动一个用户态转发（示例把 Windows `127.0.0.1:9222` 暴露到 `0.0.0.0:9224`）：
+
+```powershell
+$code = @'
+import asyncio
+
+LISTEN_HOST = "0.0.0.0"
+LISTEN_PORT = 9224
+TARGET_HOST = "127.0.0.1"
+TARGET_PORT = 9222
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    finally:
+        writer.close()
+
+async def handle(client_reader, client_writer):
+    target_reader, target_writer = await asyncio.open_connection(TARGET_HOST, TARGET_PORT)
+    await asyncio.gather(pipe(client_reader, target_writer), pipe(target_reader, client_writer))
+
+async def main():
+    server = await asyncio.start_server(handle, LISTEN_HOST, LISTEN_PORT)
+    async with server:
+        await server.serve_forever()
+
+asyncio.run(main())
+'@
+$path = "$env:TEMP\mediacrawler_relay_9222.py"
+Set-Content -Path $path -Value $code -Encoding UTF8
+python $path
+```
+
+4. 在 WSL 中查看 Windows 宿主机 IP，通常是 `ip route` 输出里的 `default via` 地址：
+
+```bash
+ip route | awk '/default/ {print $3; exit}'
+```
+
+5. 运行爬虫时指定 Windows 宿主机 IP 和转发端口，并清掉代理环境变量，避免本机 CDP 连接被代理劫持：
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+  NO_PROXY=127.0.0.1,localhost,172.24.16.1 \
+  uv run main.py --platform xhs --lt cookie --cookies '' --type search \
+  --keywords "测试" --get_comment false \
+  --cdp_host 172.24.16.1 --cdp_debug_port 9224
+```
+
+把示例里的 `172.24.16.1` 替换成你本机 `ip route` 查到的 Windows 宿主机 IP。Edge 授权式远程调试通常不会提供 `/json/version`，程序会自动退回到 `ws://<cdp_host>:<cdp_debug_port>/devtools/browser` 直连。
 
 ### 方式二：启动新浏览器
 
@@ -79,6 +141,7 @@ CDP_CONNECT_EXISTING = False  # 关闭连接已有浏览器，改为启动新浏
 |--------|------|--------|------|
 | `ENABLE_CDP_MODE` | bool | True | 是否启用CDP模式 |
 | `CDP_CONNECT_EXISTING` | bool | True | 是否连接已有浏览器（推荐开启） |
+| `CDP_HOST` | str | "localhost" | CDP调试主机，WSL、容器或端口转发场景可改为宿主机 IP |
 | `CDP_DEBUG_PORT` | int | 9222 | CDP调试端口 |
 | `CDP_HEADLESS` | bool | False | CDP模式下的无头模式 |
 | `AUTO_CLOSE_BROWSER` | bool | True | 程序结束时是否关闭浏览器 |
@@ -197,6 +260,8 @@ python main.py
 **解决方案**:
 - 检查防火墙设置
 - 确保localhost访问正常
+- WSL/容器中连接 Windows/宿主机浏览器时，使用`--cdp_host`指定宿主机 IP，并确认端口转发正在运行
+- 清理`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`等环境变量，避免 CDP 本机连接走代理
 - 尝试重启浏览器
 
 ### 调试技巧

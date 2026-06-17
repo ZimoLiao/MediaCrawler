@@ -43,6 +43,7 @@ class CDPBrowserManager:
         self.browser_context: Optional[BrowserContext] = None
         self.debug_port: Optional[int] = None
         self._cleanup_registered = False
+        self._using_existing_context = False
 
     def _register_cleanup_handlers(self):
         """
@@ -229,18 +230,19 @@ class CDPBrowserManager:
         Test if CDP connection is available
         """
         try:
+            cdp_host = getattr(config, "CDP_HOST", "localhost")
             # Simple socket connection test
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(5)
-                result = s.connect_ex(("localhost", debug_port))
+                result = s.connect_ex((cdp_host, debug_port))
                 if result == 0:
                     utils.logger.info(
-                        f"[CDPBrowserManager] CDP port {debug_port} is accessible"
+                        f"[CDPBrowserManager] CDP endpoint {cdp_host}:{debug_port} is accessible"
                     )
                     return True
                 else:
                     utils.logger.warning(
-                        f"[CDPBrowserManager] CDP port {debug_port} is not accessible"
+                        f"[CDPBrowserManager] CDP endpoint {cdp_host}:{debug_port} is not accessible"
                     )
                     return False
         except Exception as e:
@@ -289,10 +291,12 @@ class CDPBrowserManager:
         """
         Get browser WebSocket connection URL
         """
+        cdp_host = getattr(config, "CDP_HOST", "localhost")
+        direct_ws_url = f"ws://{cdp_host}:{debug_port}/devtools/browser"
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 response = await client.get(
-                    f"http://localhost:{debug_port}/json/version", timeout=10
+                    f"http://{cdp_host}:{debug_port}/json/version", timeout=10
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -304,11 +308,17 @@ class CDPBrowserManager:
                         return ws_url
                     else:
                         raise RuntimeError("webSocketDebuggerUrl not found")
-                else:
-                    raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+                utils.logger.warning(
+                    "[CDPBrowserManager] /json/version returned HTTP "
+                    f"{response.status_code}; falling back to direct browser endpoint"
+                )
+                return direct_ws_url
         except Exception as e:
-            utils.logger.error(f"[CDPBrowserManager] Failed to get WebSocket URL: {e}")
-            raise
+            utils.logger.warning(
+                f"[CDPBrowserManager] Failed to get WebSocket URL from /json/version: {e}; "
+                "falling back to direct browser endpoint"
+            )
+            return direct_ws_url
 
     async def _connect_via_cdp(self, playwright: Playwright):
         """
@@ -359,9 +369,11 @@ class CDPBrowserManager:
         if contexts:
             # Use existing first context
             browser_context = contexts[0]
+            self._using_existing_context = True
             utils.logger.info("[CDPBrowserManager] Using existing browser context")
         else:
             # Create new context
+            self._using_existing_context = False
             context_options = {
                 "viewport": {"width": 1920, "height": 1080},
                 "accept_downloads": True,
@@ -432,15 +444,20 @@ class CDPBrowserManager:
             # Close browser context
             if self.browser_context:
                 try:
-                    # Check if context is already closed
-                    # Try to get page list, if fails means already closed
-                    try:
-                        pages = self.browser_context.pages
-                        if pages is not None:
-                            await self.browser_context.close()
-                            utils.logger.info("[CDPBrowserManager] Browser context closed")
-                    except:
-                        utils.logger.debug("[CDPBrowserManager] Browser context already closed")
+                    if config.CDP_CONNECT_EXISTING and self._using_existing_context:
+                        utils.logger.info(
+                            "[CDPBrowserManager] Reused existing browser context, skipping context close"
+                        )
+                    else:
+                        # Check if context is already closed.
+                        # Try to get page list, if fails means already closed.
+                        try:
+                            pages = self.browser_context.pages
+                            if pages is not None:
+                                await self.browser_context.close()
+                                utils.logger.info("[CDPBrowserManager] Browser context closed")
+                        except:
+                            utils.logger.debug("[CDPBrowserManager] Browser context already closed")
                 except Exception as context_error:
                     # Only log warning if error is not due to already being closed
                     error_msg = str(context_error).lower()
@@ -452,6 +469,7 @@ class CDPBrowserManager:
                         utils.logger.debug(f"[CDPBrowserManager] Browser context already closed: {context_error}")
                 finally:
                     self.browser_context = None
+                    self._using_existing_context = False
 
             # Disconnect browser
             if self.browser:
