@@ -1,0 +1,15 @@
+[Unit]
+Description=MediaCrawler Hotboard HTTP API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/repo/personal/MediaCrawler-hotboard
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/repo/personal/MediaCrawler-hotboard/.venv/bin/python -m hotboard --serve-only --host 0.0.0.0 --port 8765 --db /repo/personal/MediaCrawler-hotboard/data/hotboard/hotboard.db
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

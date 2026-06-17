@@ -1,0 +1,11 @@
+[Unit]
+Description=MediaCrawler Hotboard capture
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/repo/personal/MediaCrawler-hotboard
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/repo/personal/MediaCrawler-hotboard/.venv/bin/python -m hotboard --once --db /repo/personal/MediaCrawler-hotboard/data/hotboard/hotboard.db
+TimeoutStartSec=15min
