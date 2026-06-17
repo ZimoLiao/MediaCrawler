@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import mimetypes
+import os
 import re
 import shutil
 import sys
@@ -42,6 +43,45 @@ IMAGE_URL_FIELDS = (
     "video_cover_url",
     "avatar",
 )
+
+
+class SocialSmokeError(RuntimeError):
+    """Expected social-smoke failure that should be shown without a traceback."""
+
+
+def _parse_bool_text(value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
+def _resolve_headless(value: str, platform: str) -> bool:
+    normalized = str(value or "auto").strip().lower()
+    if normalized == "auto":
+        return platform != "dy"
+    return _parse_bool_text(normalized)
+
+
+def _maybe_reexec_with_xvfb(args: argparse.Namespace) -> None:
+    platform = PLATFORM_ALIASES[args.platform]
+    if _resolve_headless(args.headless, platform):
+        return
+    if os.environ.get("DISPLAY") or os.environ.get("MEDIACRAWLER_XVFB_RUN"):
+        return
+
+    xvfb_run = shutil.which("xvfb-run")
+    if not xvfb_run:
+        return
+
+    env = {**os.environ, "MEDIACRAWLER_XVFB_RUN": "1"}
+    os.execvpe(
+        xvfb_run,
+        [xvfb_run, "-a", sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+        env,
+    )
 
 
 def _split_image_urls(value: Any) -> list[str]:
@@ -80,6 +120,31 @@ def _jsonl_file_summaries(out_dir: Path) -> list[dict[str, Any]]:
 
 def _has_output_rows(out_dir: Path) -> bool:
     return any(item["rows"] for item in _jsonl_file_summaries(out_dir))
+
+
+def _empty_search_message(platform: str) -> str:
+    if platform == "dy":
+        return (
+            "MediaCrawler produced no Douyin search rows. Douyin commonly returns an empty data list with "
+            "search_nil_info.search_nil_type=verify_check when the current account/session is under verification; "
+            "retry later or refresh the persistent login profile in a headed browser."
+        )
+    if platform == "wb":
+        return (
+            "MediaCrawler produced no Weibo search rows. Weibo may have redirected the mobile search API to captcha; "
+            "refresh the persistent login profile and clear the captcha in a headed browser."
+        )
+    if platform == "xhs":
+        return (
+            "MediaCrawler produced no Xiaohongshu search rows. Xiaohongshu may return HTTP 461 verification challenges "
+            "even when the login-state check succeeds; refresh the persistent login profile in a headed browser."
+        )
+    return f"MediaCrawler produced no {platform} search rows."
+
+
+def _raise_if_empty_search(out_dir: Path, platform: str, action: str) -> None:
+    if action == "search" and not _has_output_rows(out_dir):
+        raise SocialSmokeError(_empty_search_message(platform))
 
 
 def _extension_from_response(url: str, content_type: str) -> str:
@@ -330,6 +395,8 @@ async def run(args: argparse.Namespace) -> int:
 
     import config
 
+    headless = _resolve_headless(getattr(args, "headless", "auto"), platform)
+
     if platform == "bili" and args.action == "creator":
         _run_bili_creator_card(out_dir, args.creator)
         _print_run_summary(
@@ -392,7 +459,7 @@ async def run(args: argparse.Namespace) -> int:
         "--max_comments_count_singlenotes", str(args.comment_limit),
         "--get_comment", "true" if args.comments else "false",
         "--get_sub_comment", "false",
-        "--headless", "true",
+        "--headless", "true" if headless else "false",
     ]
     if args.target:
         sys.argv.extend(["--specified_id", _normalize_target(platform, args.target)])
@@ -415,6 +482,8 @@ async def run(args: argparse.Namespace) -> int:
     downloaded_images: list[dict[str, str]] = []
     if args.download_images:
         downloaded_images = _download_images(out_dir, platform, limit=max(1, args.image_limit))
+
+    _raise_if_empty_search(out_dir, platform, args.action)
 
     _print_run_summary(
         repo_root=repo_root,
@@ -442,10 +511,21 @@ def main_cli() -> int:
     parser.add_argument("--output", default="")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument(
+        "--headless",
+        default="auto",
+        help="Browser headless mode: auto, true, or false. auto uses a headed browser for Douyin.",
+    )
+    parser.add_argument(
         "--browser",
         default="/home/lzmo/.cache/ms-playwright/chromium-1124/chrome-linux/chrome",
     )
-    return asyncio.run(run(parser.parse_args()))
+    args = parser.parse_args()
+    _maybe_reexec_with_xvfb(args)
+    try:
+        return asyncio.run(run(args))
+    except SocialSmokeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _load_social_smoke():
     script = Path(__file__).resolve().parents[1] / "scripts" / "social-smoke.py"
@@ -93,6 +95,22 @@ def test_bili_detail_fallback_writes_contents_jsonl(tmp_path, monkeypatch):
     assert row["video_url"] == "https://www.bilibili.com/video/BV1detail"
     assert row["title"] == "detail title"
     assert row["nickname"] == "author"
+
+
+def test_headless_auto_uses_headed_browser_for_douyin_only():
+    module = _load_social_smoke()
+
+    assert module._resolve_headless("auto", "dy") is False
+    assert module._resolve_headless("auto", "xhs") is True
+    assert module._resolve_headless("true", "dy") is True
+    assert module._resolve_headless("false", "xhs") is False
+
+
+def test_empty_douyin_search_output_raises_verification_diagnostic(tmp_path):
+    module = _load_social_smoke()
+
+    with pytest.raises(RuntimeError, match="verify_check"):
+        module._raise_if_empty_search(tmp_path, "dy", "search")
 
 
 def test_bili_fallback_cover_url_can_be_downloaded(tmp_path, monkeypatch):
