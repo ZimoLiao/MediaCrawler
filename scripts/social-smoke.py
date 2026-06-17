@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import html
 import json
 import mimetypes
 import re
@@ -15,6 +16,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -167,6 +169,130 @@ def _write_jsonl(path: Path, row: dict[str, Any]) -> None:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _strip_html(value: Any) -> str:
+    text = re.sub(r"<[^>]+>", "", str(value or ""))
+    return html.unescape(text).strip()
+
+
+def _normalize_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if url.startswith("//"):
+        return f"https:{url}"
+    return url
+
+
+def _request_bili_json(endpoint: str, params: dict[str, Any], label: str) -> dict[str, Any]:
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        f"https://api.bilibili.com{endpoint}?{query}",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://search.bilibili.com/",
+            "Accept": "application/json",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cookie": f"buvid3={uuid.uuid4().hex.upper()}infoc; b_nut={int(datetime.now().timestamp())}",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if payload.get("code") != 0:
+        raise RuntimeError(f"Bilibili {label} API failed: {payload}")
+    return payload
+
+
+def _bili_jsonl_path(out_dir: Path, action: str, item_type: str) -> Path:
+    date_text = datetime.now().strftime("%Y-%m-%d")
+    return out_dir / "bili" / "jsonl" / f"{action}_{item_type}_{date_text}.jsonl"
+
+
+def _print_run_summary(
+    *,
+    repo_root: Path,
+    out_dir: Path,
+    platform: str,
+    action: str,
+    warning: str = "",
+    downloaded_images: int = 0,
+) -> None:
+    print(json.dumps({
+        "platform": platform,
+        "action": action,
+        "profile": str(repo_root / "browser_data" / f"cdp_{platform}_user_data_dir"),
+        "output": str(out_dir),
+        "warning": warning,
+        "downloaded_images": downloaded_images,
+        "files": _jsonl_file_summaries(out_dir),
+    }, ensure_ascii=False, indent=2))
+
+
+def _run_bili_search_fallback(out_dir: Path, keyword: str, *, limit: int) -> None:
+    payload = _request_bili_json(
+        "/x/web-interface/search/type",
+        {
+            "search_type": "video",
+            "keyword": keyword,
+            "page": 1,
+            "page_size": max(1, limit),
+        },
+        "search",
+    )
+
+    path = _bili_jsonl_path(out_dir, "search", "contents")
+    for item in (payload.get("data") or {}).get("result", [])[:limit]:
+        row = {
+            "video_id": str(item.get("bvid") or item.get("aid") or ""),
+            "video_url": _normalize_url(item.get("arcurl")),
+            "title": _strip_html(item.get("title")),
+            "desc": _strip_html(item.get("description") or item.get("desc")),
+            "nickname": item.get("author") or item.get("uname") or "",
+            "user_id": str(item.get("mid") or ""),
+            "create_time": item.get("pubdate") or "",
+            "video_play_count": item.get("play") or "",
+            "video_comment": item.get("review") or "",
+            "video_favorite_count": item.get("favorites") or "",
+            "liked_count": item.get("like") or "",
+            "source_keyword": keyword,
+            "cover_url": _normalize_url(item.get("pic")),
+        }
+        if row["video_url"] or row["video_id"]:
+            _write_jsonl(path, row)
+
+
+def _run_bili_detail_fallback(out_dir: Path, target: str) -> None:
+    normalized = target.strip()
+    bvid_match = re.search(r"(BV[0-9A-Za-z]+)", normalized)
+    aid_match = re.search(r"(?:av|/video/av)(\d+)", normalized, re.I)
+    query: dict[str, str] = {}
+    if bvid_match:
+        query["bvid"] = bvid_match.group(1)
+    elif aid_match:
+        query["aid"] = aid_match.group(1)
+    elif normalized.isdigit():
+        query["aid"] = normalized
+    else:
+        raise ValueError(f"Bilibili detail target must include BV id or av id: {target}")
+
+    payload = _request_bili_json("/x/web-interface/view", query, "detail")
+    data = payload.get("data") or {}
+    owner = data.get("owner") or {}
+    stat = data.get("stat") or {}
+    row = {
+        "video_id": str(data.get("bvid") or data.get("aid") or ""),
+        "video_url": f"https://www.bilibili.com/video/{data.get('bvid')}" if data.get("bvid") else "",
+        "title": data.get("title") or "",
+        "desc": data.get("desc") or "",
+        "nickname": owner.get("name") or "",
+        "user_id": str(owner.get("mid") or ""),
+        "create_time": data.get("pubdate") or "",
+        "video_play_count": stat.get("view") or "",
+        "video_comment": stat.get("reply") or "",
+        "video_favorite_count": stat.get("favorite") or "",
+        "liked_count": stat.get("like") or "",
+        "cover_url": _normalize_url(data.get("pic")),
+    }
+    _write_jsonl(_bili_jsonl_path(out_dir, "detail", "contents"), row)
+
+
 def _run_bili_creator_card(out_dir: Path, creator: str) -> None:
     creator = _normalize_creator("bili", creator)
     match = re.search(r"space\.bilibili\.com/(\d+)", creator)
@@ -175,27 +301,21 @@ def _run_bili_creator_card(out_dir: Path, creator: str) -> None:
     if not creator.isdigit():
         raise ValueError(f"Bilibili creator must be a UID or space URL: {creator}")
 
-    url = f"https://api.bilibili.com/x/web-interface/card?mid={creator}"
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    if payload.get("code") != 0:
-        raise RuntimeError(f"Bilibili card API failed: {payload}")
+    payload = _request_bili_json("/x/web-interface/card", {"mid": creator}, "card")
     card = payload.get("data", {}).get("card", {})
     row = {
         "user_id": str(card.get("mid") or creator),
         "nickname": card.get("name", ""),
         "sex": card.get("sex", ""),
         "sign": card.get("sign", ""),
-        "avatar": card.get("face", ""),
+        "avatar": _normalize_url(card.get("face")),
         "last_modify_ts": int(datetime.now().timestamp() * 1000),
         "total_fans": card.get("fans", 0),
         "total_liked": "",
         "user_rank": (card.get("level_info") or {}).get("current_level", ""),
         "is_official": (card.get("official_verify") or {}).get("type", ""),
     }
-    date_text = datetime.now().strftime("%Y-%m-%d")
-    _write_jsonl(out_dir / "bili" / "jsonl" / f"creator_creators_{date_text}.jsonl", row)
+    _write_jsonl(_bili_jsonl_path(out_dir, "creator", "creators"), row)
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -212,16 +332,43 @@ async def run(args: argparse.Namespace) -> int:
 
     if platform == "bili" and args.action == "creator":
         _run_bili_creator_card(out_dir, args.creator)
-        files = _jsonl_file_summaries(out_dir)
-        print(json.dumps({
-            "platform": platform,
-            "action": args.action,
-            "profile": str(repo_root / "browser_data" / f"cdp_{platform}_user_data_dir"),
-            "output": str(out_dir),
-            "warning": "Used lightweight Bilibili card API fallback; recent creator videos are not included.",
-            "downloaded_images": 0,
-            "files": files,
-        }, ensure_ascii=False, indent=2))
+        _print_run_summary(
+            repo_root=repo_root,
+            out_dir=out_dir,
+            platform=platform,
+            action=args.action,
+            warning="Used lightweight Bilibili card API fallback; recent creator videos are not included.",
+        )
+        return 0
+
+    if platform == "bili" and args.action == "search":
+        _run_bili_search_fallback(out_dir, args.keyword, limit=args.limit)
+        downloaded_images = []
+        if args.download_images:
+            downloaded_images = _download_images(out_dir, platform, limit=max(1, args.image_limit))
+        _print_run_summary(
+            repo_root=repo_root,
+            out_dir=out_dir,
+            platform=platform,
+            action=args.action,
+            warning="Used lightweight Bilibili search API fallback.",
+            downloaded_images=len(downloaded_images),
+        )
+        return 0
+
+    if platform == "bili" and args.action == "detail":
+        _run_bili_detail_fallback(out_dir, args.target)
+        downloaded_images = []
+        if args.download_images:
+            downloaded_images = _download_images(out_dir, platform, limit=max(1, args.image_limit))
+        _print_run_summary(
+            repo_root=repo_root,
+            out_dir=out_dir,
+            platform=platform,
+            action=args.action,
+            warning="Used lightweight Bilibili detail API fallback; comments are not included.",
+            downloaded_images=len(downloaded_images),
+        )
         return 0
 
     config.CDP_CONNECT_EXISTING = False
@@ -269,16 +416,14 @@ async def run(args: argparse.Namespace) -> int:
     if args.download_images:
         downloaded_images = _download_images(out_dir, platform, limit=max(1, args.image_limit))
 
-    files = _jsonl_file_summaries(out_dir)
-    print(json.dumps({
-        "platform": platform,
-        "action": args.action,
-        "profile": str(repo_root / "browser_data" / f"cdp_{platform}_user_data_dir"),
-        "output": str(out_dir),
-        "warning": warning,
-        "downloaded_images": len(downloaded_images),
-        "files": files,
-    }, ensure_ascii=False, indent=2))
+    _print_run_summary(
+        repo_root=repo_root,
+        out_dir=out_dir,
+        platform=platform,
+        action=args.action,
+        warning=warning,
+        downloaded_images=len(downloaded_images),
+    )
     return 0
 
 
